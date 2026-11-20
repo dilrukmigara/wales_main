@@ -1,7 +1,8 @@
 import {seed} from './seed.js';
 import {mergeBrochureTeachers} from '../scripts/imports/teachers-2027.js';
+import {AL_IMPORT,mergeAlTeachers} from '../scripts/imports/teachers-al-2029.js';
 const BROCHURE_IMPORT='wales-brochure-2027-v1';
-function importedContent(data){const next=mergeBrochureTeachers(data);next.completedImports=[...(data.completedImports||[]),BROCHURE_IMPORT];return validateContent(next);}
+function importedContent(data){let next=data;if(!next.completedImports?.includes(BROCHURE_IMPORT)){next=mergeBrochureTeachers(next);next.completedImports=[...(next.completedImports||[]),BROCHURE_IMPORT];}return validateContent(mergeAlTeachers(next));}
 import {validateContent,publicContent} from './validation.js';
 const enc=new TextEncoder();
 const hash=async v=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',enc.encode(v)))).map(x=>x.toString(16).padStart(2,'0')).join('');
@@ -14,10 +15,11 @@ async function readContent(env){
   let row=await env.DB.prepare('SELECT json,revision,updated_at FROM site_content WHERE id = ?').bind('main').first();
   if(!row){await env.DB.prepare('INSERT INTO site_content (id,json,revision,updated_at) VALUES (?,?,1,?) ON CONFLICT (id) DO NOTHING').bind('main',JSON.stringify(importedContent(seed())),Date.now()).run();continue;}
   const data=JSON.parse(row.json);
-  if(!data.completedImports?.includes(BROCHURE_IMPORT)){
+  const pending=[BROCHURE_IMPORT,AL_IMPORT].filter(id=>!data.completedImports?.includes(id));
+  if(pending.length){
    const next=importedContent(data);
    // Keep the complete pre-import state server-side for recovery; never expose it publicly.
-   await env.DB.prepare('INSERT INTO site_content (id,json,revision,updated_at) VALUES (?,?,?,?) ON CONFLICT (id) DO NOTHING').bind('backup:'+BROCHURE_IMPORT,row.json,row.revision,row.updated_at).run();
+   for(const id of pending)await env.DB.prepare('INSERT INTO site_content (id,json,revision,updated_at) VALUES (?,?,?,?) ON CONFLICT (id) DO NOTHING').bind('backup:'+id,row.json,row.revision,row.updated_at).run();
    await env.DB.prepare('UPDATE site_content SET json=?,revision=revision+1,updated_at=? WHERE id=? AND revision=?').bind(JSON.stringify(next),Date.now(),'main',row.revision).run();
    continue;
   }
