@@ -35,3 +35,22 @@ test('media validation permits only public asset paths',()=>{
  for(const p of ['/logo.png','/cover.png','/images/teachers/sir-1.jpg','/videos/class.mp4'])assert(safeUrl(p,{local:true}));
  for(const p of ['https://drive.google.com/a','//evil.test/a.jpg','/images/../x.jpg','/x.svg','/x.jpg?x=1'])assert(!safeUrl(p,{local:true}));
 });
+
+test('brochure migration preserves existing private data, backs up once, and does not recreate removed profiles',async()=>{
+ const {seed}=await import('../server/seed.js');
+ const pg=new PGlite();await pg.exec(await readFile(new URL('../database/schema.sql',import.meta.url),'utf8'));
+ const original=seed();original.teachers[0].published=false;original.teachers[0].notes='Keep this private draft';
+ await pg.query('INSERT INTO site_content (id,json,revision,updated_at) VALUES ($1,$2,$3,$4)',['main',JSON.stringify(original),9,123]);
+ const sql={query(text,params=[]){return {then(resolve,reject){return pg.query(text,params).then(r=>({rows:r.rows,rowCount:r.affectedRows??r.rows.length})).then(resolve,reject)}}}};
+ const env={DB:createDatabase(sql)};
+ try{
+  let res=await handleApi(new Request('https://wales.test/api/site'),env);assert.equal(res.status,200);
+  let saved=(await pg.query('SELECT * FROM site_content WHERE id=$1',['main'])).rows[0];assert.equal(saved.revision,10);
+  const data=JSON.parse(saved.json);assert.deepEqual(data.teachers[0],original.teachers[0]);
+  const backup=(await pg.query('SELECT * FROM site_content WHERE id=$1',['backup:wales-brochure-2027-v1'])).rows[0];assert.deepEqual(JSON.parse(backup.json),original);
+  const imported=data.teachers.find(t=>t.id.startsWith('brochure-2027-'));data.teachers=data.teachers.filter(t=>t.id!==imported.id);
+  await pg.query('UPDATE site_content SET json=$1 WHERE id=$2',[JSON.stringify(data),'main']);
+  res=await handleApi(new Request('https://wales.test/api/site'),env);assert.equal(res.status,200);assert(!(await res.json()).data.teachers.some(t=>t.id===imported.id));
+  saved=(await pg.query('SELECT * FROM site_content WHERE id=$1',['main'])).rows[0];assert.equal(saved.revision,10);
+ }finally{await pg.close()}
+});

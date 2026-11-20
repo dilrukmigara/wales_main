@@ -1,4 +1,7 @@
 import {seed} from './seed.js';
+import {mergeBrochureTeachers} from '../scripts/imports/teachers-2027.js';
+const BROCHURE_IMPORT='wales-brochure-2027-v1';
+function importedContent(data){const next=mergeBrochureTeachers(data);next.completedImports=[...(data.completedImports||[]),BROCHURE_IMPORT];return validateContent(next);}
 import {validateContent,publicContent} from './validation.js';
 const enc=new TextEncoder();
 const hash=async v=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',enc.encode(v)))).map(x=>x.toString(16).padStart(2,'0')).join('');
@@ -6,7 +9,22 @@ const json=(data,status=200,extra={})=>new Response(JSON.stringify(data),{status
 const error=(message,status)=>Object.assign(new Error(message),{status});
 const tokenFrom=r=>r.headers.get('cookie')?.match(/(?:^|;\s*)wales_admin=([a-f0-9-]{73})/)?.[1]||'';
 const cookie=(value,age)=>`wales_admin=${value}; Path=/; HttpOnly; ${process.env.NODE_ENV==='production'?'Secure; ':''}SameSite=Strict; Max-Age=${age}`;
-async function readContent(env){let row=await env.DB.prepare('SELECT json,revision,updated_at FROM site_content WHERE id = ?').bind('main').first();if(!row){await env.DB.prepare('INSERT INTO site_content (id,json,revision,updated_at) VALUES (?,?,1,?) ON CONFLICT (id) DO NOTHING').bind('main',JSON.stringify(seed()),Date.now()).run();row=await env.DB.prepare('SELECT json,revision,updated_at FROM site_content WHERE id = ?').bind('main').first()}return {data:JSON.parse(row.json),revision:row.revision,updatedAt:row.updated_at};}
+async function readContent(env){
+ for(let attempt=0;attempt<4;attempt++){
+  let row=await env.DB.prepare('SELECT json,revision,updated_at FROM site_content WHERE id = ?').bind('main').first();
+  if(!row){await env.DB.prepare('INSERT INTO site_content (id,json,revision,updated_at) VALUES (?,?,1,?) ON CONFLICT (id) DO NOTHING').bind('main',JSON.stringify(importedContent(seed())),Date.now()).run();continue;}
+  const data=JSON.parse(row.json);
+  if(!data.completedImports?.includes(BROCHURE_IMPORT)){
+   const next=importedContent(data);
+   // Keep the complete pre-import state server-side for recovery; never expose it publicly.
+   await env.DB.prepare('INSERT INTO site_content (id,json,revision,updated_at) VALUES (?,?,?,?) ON CONFLICT (id) DO NOTHING').bind('backup:'+BROCHURE_IMPORT,row.json,row.revision,row.updated_at).run();
+   await env.DB.prepare('UPDATE site_content SET json=?,revision=revision+1,updated_at=? WHERE id=? AND revision=?').bind(JSON.stringify(next),Date.now(),'main',row.revision).run();
+   continue;
+  }
+  return {data,revision:row.revision,updatedAt:row.updated_at};
+ }
+ throw error('Content changed while the brochure was importing. Please reload.',503);
+}
 async function authorized(request,env){const token=tokenFrom(request);if(!token)return false;const session=await env.DB.prepare('SELECT expires_at FROM admin_sessions WHERE token_hash = ?').bind(await hash(token)).first();return Boolean(session&&session.expires_at>Date.now());}
 function checkOrigin(r){const origin=r.headers.get('origin');if(!origin||origin!==new URL(r.url).origin||r.headers.get('x-wales-admin')!=='1')throw error('Request origin rejected. Reload the admin page.',403)}
 async function readJson(r){const length=Number(r.headers.get('content-length')||0);if(length>1600000)throw error('Request too large.',413);const text=await r.text();if(text.length>1600000)throw error('Request too large.',413);try{return JSON.parse(text)}catch{throw error('Invalid JSON.',400)}}
